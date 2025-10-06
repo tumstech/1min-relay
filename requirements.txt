@@ -2,7 +2,7 @@ flask==3.1.2
 requests==2.32.5
 waitress==3.0.2
 mistral_common==1.8.5
-flask-limiter==3.11.0
+flask-limiter==4.0.0
 limits[memcached]==4.4.1
 coloredlogs==15.0.1
 printedcolors==1.0.0
