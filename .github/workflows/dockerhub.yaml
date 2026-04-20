@@ -36,7 +36,7 @@ jobs:
           push: true   # Push the image to the registry after building
           platforms: linux/amd64,linux/arm64
           tags: |
-            kokofixcomputers/1minrelay:${{ github.sha }}
-            kokofixcomputers/1minrelay:latest
-            kokofixcomputers/1min-relay:${{ github.sha }}
-            kokofixcomputers/1min-relay:latest
+            tumstech/1minrelay:${{ github.sha }}
+            tumstech/1minrelay:latest
+            tumstech/1min-relay:${{ github.sha }}
+            tumstech/1min-relay:latest
