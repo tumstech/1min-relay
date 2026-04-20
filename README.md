@@ -1,5 +1,8 @@
 # 1min-Relay
 
+## IMPORTANT - This is a forked Repo, source credit goes to Kokodev, Have preserved the original Readme for credit purpose.
+This repo adds support for Code Generation, API currently supported by 1min.
+
 ## Overview
 1min-Relay relays the 1min AI API to an OpenAI-compatible structure in under one minute. This project supports fast, reliable integration with various clients, features for managing conversation history and models, and optional hosted or self-hosted deployments. For details and updates, visit the hosted version and community channels below.
 
