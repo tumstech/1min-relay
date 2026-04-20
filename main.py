@@ -436,6 +436,85 @@ def generate_images():
         logger.error(f"Image generation failed: {str(e)}")
         return ERROR_HANDLER(1044)  # Handle image generation error
 
+@app.route('/v1/completions', methods=['POST', 'OPTIONS'])
+@limiter.limit("500 per minute")
+def completions():
+    if request.method == 'OPTIONS':
+        return handle_options_request()
+
+    auth_header = request.headers.get('Authorization')
+    if not auth_header or not auth_header.startswith("Bearer "):
+        logger.error("Invalid Authentication")
+        return ERROR_HANDLER(1021)
+    
+    api_key = auth_header.split(" ")[1]
+    
+    headers = {
+        'API-KEY': api_key,
+        'Content-Type': 'application/json'
+    }
+    
+    request_data = request.json
+    
+    prompt = request_data.get('prompt', '')
+    if not prompt:
+        return ERROR_HANDLER(1412)  # No prompt provided
+    
+    model = request_data.get('model', 'gpt-4o')
+    if PERMIT_MODELS_FROM_SUBSET_ONLY and model not in AVAILABLE_MODELS:
+        return ERROR_HANDLER(1002, model)  # Handle invalid model
+    
+    prompt_token = calculate_token(prompt)
+    logger.debug(f"Processing {prompt_token} prompt tokens with model {model} for code completion")
+    
+    payload = {
+        "type": "CODE_GENERATOR",
+        "model": model,
+        "conversationId": "CODE_GENERATOR",
+        "promptObject": {
+            "prompt": prompt,
+            "webSearch": False
+        }
+    }
+    
+    try:
+        response = requests.post(ONE_MIN_API_URL, json=payload, headers=headers)
+        response.raise_for_status()
+        one_min_response = response.json()
+        
+        generated_code = one_min_response['aiRecord']['aiRecordDetail']['resultObject'][0]
+        completion_token = calculate_token(generated_code)
+        
+        transformed_response = {
+            "id": f"cmpl-{uuid.uuid4()}",
+            "object": "text_completion",
+            "created": int(time.time()),
+            "model": model,
+            "choices": [
+                {
+                    "text": generated_code,
+                    "index": 0,
+                    "finish_reason": "stop"
+                }
+            ],
+            "usage": {
+                "prompt_tokens": prompt_token,
+                "completion_tokens": completion_token,
+                "total_tokens": prompt_token + completion_token
+            }
+        }
+        
+        response = make_response(jsonify(transformed_response))
+        set_response_headers(response)
+        
+        return response, 200
+    
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Code generation failed: {str(e)}")
+        if response.status_code == 401:
+            return ERROR_HANDLER(1020, key=api_key)
+        return ERROR_HANDLER(1405)  # Method Not Allowed or general error
+
 def handle_options_request():
     response = make_response()
     response.headers.add('Access-Control-Allow-Origin', '*')

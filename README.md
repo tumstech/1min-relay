@@ -22,6 +22,7 @@
 - Docker support: Simple deployment with Docker
 - Multi-document support: Upload and process documents (e.g., .docx, .pdf, .txt, .yaml, etc.)
 - Image support: Upload and process images
+- Code generation support: Generate code using AI models
 - Architecture compatibility: ARM64 and AMD64 support
 - Concurrent requests: Handles multiple requests simultaneously
 
