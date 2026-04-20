@@ -41,7 +41,7 @@ def check_memcached_connection(host='memcached', port=11211):
     except:
         return False
         
-logger.info('''
+logger.info(r'''
     _ __  __ _      ___     _           
  / |  \/  (_)_ _ | _ \___| |__ _ _  _ 
  | | |\/| | | ' \|   / -_) / _` | || |
@@ -133,6 +133,9 @@ ALL_ONE_MIN_AVAILABLE_MODELS = [
     "gpt-o4-mini",
     "gpt-4.1-nano",
     "gpt-4.1-mini",
+    "gpt-5.4",
+    "gpt-5.4-mini",
+    "gpt-5.4-nano",
 
    # Replicate
    "meta/llama-2-70b-chat", 
@@ -327,16 +330,18 @@ def conversation():
 
         user_input = str(combined_text)
 
-    prompt_token = calculate_token(str(all_messages))
-    if PERMIT_MODELS_FROM_SUBSET_ONLY and request_data.get('model', 'mistral-nemo') not in AVAILABLE_MODELS:
-        return ERROR_HANDLER(1002, request_data.get('model', 'mistral-nemo')) # Handle invalid model
+    model = request_data.get('model', 'mistral-nemo')
+
+    prompt_token = calculate_token(str(all_messages), model)
+    if PERMIT_MODELS_FROM_SUBSET_ONLY and model not in AVAILABLE_MODELS:
+        return ERROR_HANDLER(1002, model) # Handle invalid model
     
-    logger.debug(f"Proccessing {prompt_token} prompt tokens with model {request_data.get('model', 'mistral-nemo')}")
+    logger.debug(f"Proccessing {prompt_token} prompt tokens with model {model}")
 
     if not image:
         payload = {
             "type": "CHAT_WITH_AI",
-            "model": request_data.get('model', 'mistral-nemo'),
+            "model": model,
             "promptObject": {
                 "prompt": all_messages,
                 "isMixed": False,
@@ -346,7 +351,7 @@ def conversation():
     else:
         payload = {
             "type": "CHAT_WITH_IMAGE",
-            "model": request_data.get('model', 'mistral-nemo'),
+            "model": model,
             "promptObject": {
                 "prompt": all_messages,
                 "isMixed": False,
@@ -372,13 +377,18 @@ def conversation():
     else:
         # Streaming Response
         logger.debug("Streaming AI Response")
-        response_stream = requests.post(ONE_MIN_CONVERSATION_API_STREAMING_URL, data=json.dumps(payload), headers=headers, stream=True)
+        response_stream = requests.post(ONE_MIN_CONVERSATION_API_STREAMING_URL, json=payload, headers=headers, stream=True)
         if response_stream.status_code != 200:
             if response_stream.status_code == 401:
                 return ERROR_HANDLER(1020)
+            try:
+                error_payload = response_stream.json()
+                logger.error(f"1min streaming error body: {error_payload}")
+            except ValueError:
+                logger.error(f"1min streaming error text: {response_stream.text}")
             logger.error(f"An unknown error occurred while processing the user's request. Error code: {response_stream.status_code}")
             return ERROR_HANDLER(response_stream.status_code)
-        return Response(stream_response(response_stream, request_data, request_data.get('model', 'mistral-nemo'), int(prompt_token)), content_type='text/event-stream')
+        return Response(stream_response(response_stream, request_data, model, int(prompt_token)), content_type='text/event-stream')
 
 @app.route('/v1/images/generations', methods=['POST', 'OPTIONS'])
 @limiter.limit("100 per minute")
@@ -464,7 +474,7 @@ def completions():
     if PERMIT_MODELS_FROM_SUBSET_ONLY and model not in AVAILABLE_MODELS:
         return ERROR_HANDLER(1002, model)  # Handle invalid model
     
-    prompt_token = calculate_token(prompt)
+    prompt_token = calculate_token(prompt, model)
     logger.debug(f"Processing {prompt_token} prompt tokens with model {model} for code completion")
     
     payload = {
@@ -511,7 +521,7 @@ def completions():
     
     except requests.exceptions.RequestException as e:
         logger.error(f"Code generation failed: {str(e)}")
-        if response.status_code == 401:
+        if hasattr(e, 'response') and e.response is not None and e.response.status_code == 401:
             return ERROR_HANDLER(1020, key=api_key)
         return ERROR_HANDLER(1405)  # Method Not Allowed or general error
 
