@@ -576,33 +576,118 @@ def set_response_headers(response):
     response.headers['X-Request-ID'] = str (uuid.uuid4())
 
 def stream_response(response, request_data, model, prompt_tokens):
+    buffer = b""
     all_chunks = ""
-    for chunk in response.iter_content(chunk_size=1024):
-        finish_reason = None
 
-        return_chunk = {
-            "id": f"chatcmpl-{uuid.uuid4()}",
-            "object": "chat.completion.chunk",
-            "created": int(time.time()),
-            "model": request_data.get('model', 'mistral-nemo'),
-            "choices": [
-                {
-                    "index": 0,
-                    "delta": {
-                        "content": chunk.decode('utf-8')
-                    },
-                    "finish_reason": finish_reason
+    def parse_sse_event(event_bytes):
+        event_lines = event_bytes.replace(b"\r\n", b"\n").split(b"\n")
+        event_name = None
+        data_lines = []
+
+        for line in event_lines:
+            if not line:
+                continue
+            if line.startswith(b"event:"):
+                event_name = line.split(b":", 1)[1].strip().decode('utf-8')
+            elif line.startswith(b"data:"):
+                data_lines.append(line.split(b":", 1)[1].lstrip())
+
+        if not data_lines:
+            return event_name, None
+
+        data_text = b"\n".join(data_lines).decode('utf-8')
+        if data_text == '[DONE]':
+            return event_name, None
+
+        try:
+            parsed = json.loads(data_text)
+        except ValueError:
+            parsed = data_text
+
+        return event_name, parsed
+
+    for chunk in response.iter_content(chunk_size=1024):
+        if not chunk:
+            continue
+        buffer += chunk
+
+        while b"\n\n" in buffer:
+            event_bytes, buffer = buffer.split(b"\n\n", 1)
+            event_name, parsed_data = parse_sse_event(event_bytes)
+
+            if parsed_data is None:
+                continue
+
+            # Unwrap 1min API content wrapper if present
+            content_text = None
+            if isinstance(parsed_data, dict):
+                if 'content' in parsed_data:
+                    content_text = parsed_data['content']
+                elif 'delta' in parsed_data and isinstance(parsed_data['delta'], dict):
+                    content_text = parsed_data['delta'].get('content')
+                else:
+                    content_text = json.dumps(parsed_data)
+            else:
+                content_text = str(parsed_data)
+
+            if not content_text:
+                continue
+
+            all_chunks += content_text
+            return_chunk = {
+                "id": f"chatcmpl-{uuid.uuid4()}",
+                "object": "chat.completion.chunk",
+                "created": int(time.time()),
+                "model": request_data.get('model', 'mistral-nemo'),
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {
+                            "content": content_text
+                        },
+                        "finish_reason": None
+                    }
+                ]
+            }
+            yield f"data: {json.dumps(return_chunk)}\n\n"
+
+    if buffer:
+        event_name, parsed_data = parse_sse_event(buffer)
+        if parsed_data is not None:
+            content_text = None
+            if isinstance(parsed_data, dict):
+                if 'content' in parsed_data:
+                    content_text = parsed_data['content']
+                elif 'delta' in parsed_data and isinstance(parsed_data['delta'], dict):
+                    content_text = parsed_data['delta'].get('content')
+                else:
+                    content_text = json.dumps(parsed_data)
+            else:
+                content_text = str(parsed_data)
+
+            if content_text:
+                all_chunks += content_text
+                return_chunk = {
+                    "id": f"chatcmpl-{uuid.uuid4()}",
+                    "object": "chat.completion.chunk",
+                    "created": int(time.time()),
+                    "model": request_data.get('model', 'mistral-nemo'),
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {
+                                "content": content_text
+                            },
+                            "finish_reason": None
+                        }
+                    ]
                 }
-            ]
-        }
-        all_chunks += chunk.decode('utf-8')
-        yield f"data: {json.dumps(return_chunk)}\n\n"
-        
+                yield f"data: {json.dumps(return_chunk)}\n\n"
+
     tokens = calculate_token(all_chunks)
     logger.debug(f"Finished processing streaming response. Completion tokens: {str(tokens)}")
     logger.debug(f"Total tokens: {str(tokens + prompt_tokens)}")
-        
-    # Final chunk when iteration stops
+
     final_chunk = {
         "id": f"chatcmpl-{uuid.uuid4()}",
         "object": "chat.completion.chunk",
@@ -612,7 +697,7 @@ def stream_response(response, request_data, model, prompt_tokens):
             {
                 "index": 0,
                 "delta": {
-                    "content": ""    
+                    "content": ""
                 },
                 "finish_reason": "stop"
             }
