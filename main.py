@@ -5,6 +5,7 @@ import uuid
 import warnings
 from waitress import serve
 import json
+import unicodedata
 import tiktoken
 import socket
 from mistral_common.tokens.tokenizers.mistral import MistralTokenizer
@@ -480,9 +481,14 @@ def handle_1min_error(response):
 def stream_response(response, request_data, model, prompt_tokens):
     all_chunks = ""
     current_event = None
-    for line in response.iter_lines(decode_unicode=True):
+    for line in response.iter_lines(decode_unicode=False):
         if line is None:
             continue
+
+        try:
+            line = line.decode('utf-8', errors='replace')
+        except Exception:
+            line = line.decode('latin-1', errors='replace')
 
         if line.startswith("event:"):
             current_event = line.split(":", 1)[1].strip()
@@ -501,6 +507,9 @@ def stream_response(response, request_data, model, prompt_tokens):
 
             if not content:
                 continue
+
+            if isinstance(content, str):
+                content = unicodedata.normalize('NFC', content)
 
             return_chunk = {
                 "id": f"chatcmpl-{uuid.uuid4()}",
