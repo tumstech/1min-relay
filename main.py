@@ -95,7 +95,8 @@ else:
     logger.warning("Memcached is not available. Using in-memory storage for rate limiting. Not-Recommended")
 
 
-ONE_MIN_API_URL = "https://api.1min.ai/api/chat-with-ai"
+ONE_MIN_API_URL = "https://api.1min.ai/api/features"
+ONE_MIN_CHAT_API_URL = "https://api.1min.ai/api/chat-with-ai"
 ONE_MIN_CONVERSATION_API_URL = "https://api.1min.ai/api/conversations"
 ONE_MIN_CONVERSATION_API_STREAMING_URL = "https://api.1min.ai/api/chat-with-ai?isStreaming=true"
 ONE_MIN_ASSET_URL = "https://api.1min.ai/api/assets"
@@ -330,45 +331,22 @@ def conversation():
 
         user_input = str(combined_text)
 
-    model = request_data.get('model', 'mistral-nemo')
-
-    prompt_token = calculate_token(str(all_messages), model)
-    if PERMIT_MODELS_FROM_SUBSET_ONLY and model not in AVAILABLE_MODELS:
-        return ERROR_HANDLER(1002, model) # Handle invalid model
+    prompt_token = calculate_token(str(all_messages))
+    if PERMIT_MODELS_FROM_SUBSET_ONLY and request_data.get('model', 'mistral-nemo') not in AVAILABLE_MODELS:
+        return ERROR_HANDLER(1002, request_data.get('model', 'mistral-nemo')) # Handle invalid model
     
-    logger.debug(f"Proccessing {prompt_token} prompt tokens with model {model}")
+    logger.debug(f"Proccessing {prompt_token} prompt tokens with model {request_data.get('model', 'mistral-nemo')}")
 
-    if not image:
-        payload = {
-            "type": "UNIFY_CHAT_WITH_AI",
-            "model": model,
-            "promptObject": {
-                "prompt": all_messages,
-                "settings": {
-                    "historySettings": {
-                        "isMixed": False
-                    },
-                    "webSearchSettings": {
-                        "webSearch": False
-                    }
-                }
-            }
+    payload = {
+        "type": "UNIFY_CHAT_WITH_AI",
+        "model": request_data.get('model', 'mistral-nemo'),
+        "promptObject": {
+            "prompt": all_messages,
         }
-    else:
-        payload = {
-            "type": "UNIFY_CHAT_WITH_AI",
-            "model": model,
-            "promptObject": {
-                "prompt": all_messages,
-                "settings": {
-                    "historySettings": {
-                        "isMixed": False
-                    }
-                },
-                "attachments": {
-                    "images": image_paths
-                }
-            }
+    }
+    if image:
+        payload["promptObject"]["attachments"] = {
+            "images": image_paths
         }
     
     headers = {"API-KEY": api_key, 'Content-Type': 'application/json'}
@@ -376,8 +354,9 @@ def conversation():
     if not request_data.get('stream', False):
         # Non-Streaming Response
         logger.debug("Non-Streaming AI Response")
-        response = requests.post(ONE_MIN_API_URL, json=payload, headers=headers)
-        response.raise_for_status()
+        response = requests.post(ONE_MIN_CHAT_API_URL, json=payload, headers=headers)
+        if response.status_code != 200:
+            return handle_1min_error(response)
         one_min_response = response.json()
         
         transformed_response = transform_response(one_min_response, request_data, prompt_token)
@@ -389,18 +368,10 @@ def conversation():
     else:
         # Streaming Response
         logger.debug("Streaming AI Response")
-        response_stream = requests.post(ONE_MIN_CONVERSATION_API_STREAMING_URL, json=payload, headers=headers, stream=True)
+        response_stream = requests.post(ONE_MIN_CONVERSATION_API_STREAMING_URL, data=json.dumps(payload), headers=headers, stream=True)
         if response_stream.status_code != 200:
-            if response_stream.status_code == 401:
-                return ERROR_HANDLER(1020)
-            try:
-                error_payload = response_stream.json()
-                logger.error(f"1min streaming error body: {error_payload}")
-            except ValueError:
-                logger.error(f"1min streaming error text: {response_stream.text}")
-            logger.error(f"An unknown error occurred while processing the user's request. Error code: {response_stream.status_code}")
-            return ERROR_HANDLER(response_stream.status_code)
-        return Response(stream_response(response_stream, request_data, model, int(prompt_token)), content_type='text/event-stream')
+            return handle_1min_error(response_stream)
+        return Response(stream_response(response_stream, request_data, request_data.get('model', 'mistral-nemo'), int(prompt_token)), content_type='text/event-stream')
 
 @app.route('/v1/images/generations', methods=['POST', 'OPTIONS'])
 @limiter.limit("100 per minute")
@@ -458,85 +429,6 @@ def generate_images():
         logger.error(f"Image generation failed: {str(e)}")
         return ERROR_HANDLER(1044)  # Handle image generation error
 
-@app.route('/v1/completions', methods=['POST', 'OPTIONS'])
-@limiter.limit("500 per minute")
-def completions():
-    if request.method == 'OPTIONS':
-        return handle_options_request()
-
-    auth_header = request.headers.get('Authorization')
-    if not auth_header or not auth_header.startswith("Bearer "):
-        logger.error("Invalid Authentication")
-        return ERROR_HANDLER(1021)
-    
-    api_key = auth_header.split(" ")[1]
-    
-    headers = {
-        'API-KEY': api_key,
-        'Content-Type': 'application/json'
-    }
-    
-    request_data = request.json
-    
-    prompt = request_data.get('prompt', '')
-    if not prompt:
-        return ERROR_HANDLER(1412)  # No prompt provided
-    
-    model = request_data.get('model', 'gpt-4o')
-    if PERMIT_MODELS_FROM_SUBSET_ONLY and model not in AVAILABLE_MODELS:
-        return ERROR_HANDLER(1002, model)  # Handle invalid model
-    
-    prompt_token = calculate_token(prompt, model)
-    logger.debug(f"Processing {prompt_token} prompt tokens with model {model} for code completion")
-    
-    payload = {
-        "type": "CODE_GENERATOR",
-        "model": model,
-        "conversationId": "CODE_GENERATOR",
-        "promptObject": {
-            "prompt": prompt,
-            "webSearch": False
-        }
-    }
-    
-    try:
-        response = requests.post(ONE_MIN_API_URL, json=payload, headers=headers)
-        response.raise_for_status()
-        one_min_response = response.json()
-        
-        generated_code = one_min_response['aiRecord']['aiRecordDetail']['resultObject'][0]
-        completion_token = calculate_token(generated_code)
-        
-        transformed_response = {
-            "id": f"cmpl-{uuid.uuid4()}",
-            "object": "text_completion",
-            "created": int(time.time()),
-            "model": model,
-            "choices": [
-                {
-                    "text": generated_code,
-                    "index": 0,
-                    "finish_reason": "stop"
-                }
-            ],
-            "usage": {
-                "prompt_tokens": prompt_token,
-                "completion_tokens": completion_token,
-                "total_tokens": prompt_token + completion_token
-            }
-        }
-        
-        response = make_response(jsonify(transformed_response))
-        set_response_headers(response)
-        
-        return response, 200
-    
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Code generation failed: {str(e)}")
-        if hasattr(e, 'response') and e.response is not None and e.response.status_code == 401:
-            return ERROR_HANDLER(1020, key=api_key)
-        return ERROR_HANDLER(1405)  # Method Not Allowed or general error
-
 def handle_options_request():
     response = make_response()
     response.headers.add('Access-Control-Allow-Origin', '*')
@@ -575,65 +467,41 @@ def set_response_headers(response):
     response.headers['Access-Control-Allow-Origin'] = '*'
     response.headers['X-Request-ID'] = str (uuid.uuid4())
 
+def handle_1min_error(response):
+    if response.status_code == 401:
+        return ERROR_HANDLER(1020)
+    logger.error(
+        "1min.ai request failed with status %s: %s",
+        response.status_code,
+        response.text[:500]
+    )
+    return ERROR_HANDLER(response.status_code)
+
 def stream_response(response, request_data, model, prompt_tokens):
-    buffer = b""
     all_chunks = ""
-
-    def parse_sse_event(event_bytes):
-        event_lines = event_bytes.replace(b"\r\n", b"\n").split(b"\n")
-        event_name = None
-        data_lines = []
-
-        for line in event_lines:
-            if not line:
-                continue
-            if line.startswith(b"event:"):
-                event_name = line.split(b":", 1)[1].strip().decode('utf-8')
-            elif line.startswith(b"data:"):
-                data_lines.append(line.split(b":", 1)[1].lstrip())
-
-        if not data_lines:
-            return event_name, None
-
-        data_text = b"\n".join(data_lines).decode('utf-8')
-        if data_text == '[DONE]':
-            return event_name, None
-
-        try:
-            parsed = json.loads(data_text)
-        except ValueError:
-            parsed = data_text
-
-        return event_name, parsed
-
-    for chunk in response.iter_content(chunk_size=1024):
-        if not chunk:
+    current_event = None
+    for line in response.iter_lines(decode_unicode=True):
+        if line is None:
             continue
-        buffer += chunk
 
-        while b"\n\n" in buffer:
-            event_bytes, buffer = buffer.split(b"\n\n", 1)
-            event_name, parsed_data = parse_sse_event(event_bytes)
+        if line.startswith("event:"):
+            current_event = line.split(":", 1)[1].strip()
+            continue
 
-            if parsed_data is None:
+        if not line.startswith("data:"):
+            continue
+
+        data = line.split(":", 1)[1].strip()
+
+        if current_event == "content":
+            try:
+                content = json.loads(data).get("content", "")
+            except json.JSONDecodeError:
+                content = data
+
+            if not content:
                 continue
 
-            # Unwrap 1min API content wrapper if present
-            content_text = None
-            if isinstance(parsed_data, dict):
-                if 'content' in parsed_data:
-                    content_text = parsed_data['content']
-                elif 'delta' in parsed_data and isinstance(parsed_data['delta'], dict):
-                    content_text = parsed_data['delta'].get('content')
-                else:
-                    content_text = json.dumps(parsed_data)
-            else:
-                content_text = str(parsed_data)
-
-            if not content_text:
-                continue
-
-            all_chunks += content_text
             return_chunk = {
                 "id": f"chatcmpl-{uuid.uuid4()}",
                 "object": "chat.completion.chunk",
@@ -643,51 +511,24 @@ def stream_response(response, request_data, model, prompt_tokens):
                     {
                         "index": 0,
                         "delta": {
-                            "content": content_text
+                            "content": content
                         },
                         "finish_reason": None
                     }
                 ]
             }
+            all_chunks += content
             yield f"data: {json.dumps(return_chunk)}\n\n"
-
-    if buffer:
-        event_name, parsed_data = parse_sse_event(buffer)
-        if parsed_data is not None:
-            content_text = None
-            if isinstance(parsed_data, dict):
-                if 'content' in parsed_data:
-                    content_text = parsed_data['content']
-                elif 'delta' in parsed_data and isinstance(parsed_data['delta'], dict):
-                    content_text = parsed_data['delta'].get('content')
-                else:
-                    content_text = json.dumps(parsed_data)
-            else:
-                content_text = str(parsed_data)
-
-            if content_text:
-                all_chunks += content_text
-                return_chunk = {
-                    "id": f"chatcmpl-{uuid.uuid4()}",
-                    "object": "chat.completion.chunk",
-                    "created": int(time.time()),
-                    "model": request_data.get('model', 'mistral-nemo'),
-                    "choices": [
-                        {
-                            "index": 0,
-                            "delta": {
-                                "content": content_text
-                            },
-                            "finish_reason": None
-                        }
-                    ]
-                }
-                yield f"data: {json.dumps(return_chunk)}\n\n"
-
+        elif current_event == "error":
+            logger.error("Streaming error from 1min.ai: %s", data)
+        elif current_event == "done":
+            break
+        
     tokens = calculate_token(all_chunks)
     logger.debug(f"Finished processing streaming response. Completion tokens: {str(tokens)}")
     logger.debug(f"Total tokens: {str(tokens + prompt_tokens)}")
-
+        
+    # Final chunk when iteration stops
     final_chunk = {
         "id": f"chatcmpl-{uuid.uuid4()}",
         "object": "chat.completion.chunk",
@@ -697,7 +538,7 @@ def stream_response(response, request_data, model, prompt_tokens):
             {
                 "index": 0,
                 "delta": {
-                    "content": ""
+                    "content": ""    
                 },
                 "finish_reason": "stop"
             }
@@ -725,4 +566,3 @@ If does not work, try:
 {internal_ip}:5001/v1/chat/completions
 {printedcolors.Color.reset}""")
     serve(app, host='0.0.0.0', port=5001, threads=6) # Thread has a default of 4 if not specified. We use 6 to increase performance and allow multiple requests at once.
-
